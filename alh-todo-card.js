@@ -110,14 +110,14 @@ class AlhTodoCard extends HTMLElement {
     this._config     = { entity: '', title: 'Aufgaben', show_completed: false };
     this._hass       = null;
     this._showDone   = false;
-    this._view       = 'all';  // 'all' | 'today' | 'week' | 'cal'
+    this._view       = localStorage.getItem('alh-todo-view') || 'all';
     this._bulkMode   = false;
     this._bulkTab    = 'text'; // 'text' | 'csv'
     this._bulkText   = '';
     this._csvItems   = [];
     this._calYear    = new Date().getFullYear();
     this._calMonth   = new Date().getMonth();
-    this._calDay     = null;
+    this._calDay     = this._view === 'cal' ? isoToday() : null;
     this._form       = this._blankForm();
     this._picker     = null;
     this._unsubFn    = null;
@@ -356,14 +356,14 @@ class AlhTodoCard extends HTMLElement {
       cells.push({ day: daysInPrev - i, other: true });
     for (let d = 1; d <= daysInMon; d++) {
       const iso   = `${year}-${String(month + 1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
-      const tasks = this._items.filter(i => i.due === iso && i.status === 'needs_action');
+      const tasks = this._items.filter(i => (i.due || '').slice(0, 10) === iso && i.status === 'needs_action');
       cells.push({ day: d, iso, tasks, isToday: iso === today, overdue: iso < today && tasks.length > 0 });
     }
     let nd = 1;
     while (cells.length % 7 !== 0) cells.push({ day: nd++, other: true });
 
     const selTasks = this._calDay
-      ? this._items.filter(i => i.due === this._calDay && i.status === 'needs_action')
+      ? this._items.filter(i => (i.due || '').slice(0, 10) === this._calDay && i.status === 'needs_action')
       : [];
 
     const wds = ['Mo','Di','Mi','Do','Fr','Sa','So'];
@@ -508,6 +508,12 @@ class AlhTodoCard extends HTMLElement {
     root.querySelectorAll('[data-view]').forEach(btn =>
       btn.addEventListener('click', () => {
         this._view = btn.dataset.view;
+        localStorage.setItem('alh-todo-view', this._view);
+        if (this._view === 'cal') {
+          this._calYear  = new Date().getFullYear();
+          this._calMonth = new Date().getMonth();
+          this._calDay   = isoToday();
+        }
         this._render();
       })
     );
