@@ -20,7 +20,7 @@ Elegante Custom Lovelace Card für Home Assistant mit Fälligkeitsterminen, Wied
 
 1. HACS öffnen → **Frontend** → Drei-Punkte-Menü rechts oben → **Custom repositories**
 2. Eintragen:
-   - **URL**: `https://github.com/DEIN-GITHUB-USER/alltagshelfer-todo-card`
+   - **URL**: `https://github.com/f-hohengarten/alltagshelfer-todo-card`
    - **Kategorie**: Lovelace
 3. → **Add** → Repo in der Liste suchen → **Download**
 4. Home Assistant Browser-Seite neu laden (Strg+F5 / Cmd+Shift+R)
