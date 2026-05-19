@@ -126,7 +126,7 @@ class AlhTodoCard extends HTMLElement {
             await this._fetchItems();
           }
         },
-        'todo_updated'
+        'todo_item_list_updated'
       );
     } catch (e) {
       console.warn('[alh-todo-card] subscribeEvents fehlgeschlagen', e);
@@ -224,6 +224,9 @@ class AlhTodoCard extends HTMLElement {
               ${rLbl ? `<span class="item__recur">↩ ${x(rLbl)}</span>` : ''}
             </div>` : ''}
         </button>
+        <button class="item__del" data-action="delete-item" data-uid="${x(item.uid)}" aria-label="Löschen">
+          <svg viewBox="0 0 24 24"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+        </button>
       </li>
     `;
   }
@@ -307,6 +310,10 @@ class AlhTodoCard extends HTMLElement {
 
     root.querySelectorAll('[data-action="edit"]').forEach(btn =>
       btn.addEventListener('click', () => this._openEdit(btn.dataset.uid))
+    );
+
+    root.querySelectorAll('[data-action="delete-item"]').forEach(btn =>
+      btn.addEventListener('click', e => { e.stopPropagation(); this._delete(btn.dataset.uid); })
     );
 
     root.querySelector('[data-action="cancel"]')?.addEventListener('click', () => {
@@ -553,6 +560,16 @@ class AlhTodoCard extends HTMLElement {
       .item__due--tomorrow { color: #ff9500;                      background: rgba(255,149,0,0.12); }
       .item__due--future   { color: var(--secondary-text-color,currentColor); opacity:0.65; background: rgba(128,128,128,0.1); }
       .item__recur         { color: var(--secondary-text-color,currentColor); opacity:0.55; background: rgba(128,128,128,0.08); }
+
+      .item__del {
+        width: 30px; height: 30px; flex-shrink: 0;
+        border-radius: 6px; border: none; background: transparent;
+        cursor: pointer; display: flex; align-items: center; justify-content: center;
+        padding: 0; color: var(--secondary-text-color, currentColor);
+        opacity: 0.3; transition: opacity 0.15s, background 0.15s, color 0.15s;
+      }
+      .item__del svg { width: 15px; height: 15px; fill: currentColor; }
+      .item__del:hover { opacity: 1; background: rgba(244,67,54,0.12); color: var(--error-color, #f44336); }
 
       /* ── Empty ── */
       .empty {
