@@ -329,58 +329,61 @@ class AlhTodoCard extends HTMLElement {
 
   // ─── Services ───────────────────────────────────────────────────────────────
 
+  _svc(service, data) {
+    const { entity_id, ...serviceData } = data;
+    this._hass.callService('todo', service, serviceData, { entity_id });
+  }
+
   _toggle(uid) {
     const item = this._items.find(i => i.uid === uid);
     if (!item) return;
-    const meta      = parseMeta(item.description);
+    const meta       = parseMeta(item.description);
     const completing = item.status === 'needs_action';
 
     if (completing && meta.recur) {
-      const nd = nextDue(item.due, meta.recur);
-      this._hass.callService('todo', 'add_item', {
-        entity_id: this._config.entity,
-        item:        item.summary,
-        due_date:    nd ?? undefined,
-        description: encodeMeta(meta) || undefined,
-      });
+      const nd  = nextDue(item.due, meta.recur);
+      const svc = { entity_id: this._config.entity, item: item.summary };
+      if (nd) svc.due_date = nd;
+      const desc = encodeMeta(meta);
+      if (desc) svc.description = desc;
+      this._svc('add_item', svc);
     }
 
-    this._hass.callService('todo', 'update_item', {
+    this._svc('update_item', {
       entity_id: this._config.entity,
-      item:   uid,
-      status: completing ? 'completed' : 'needs_action',
+      item:      uid,
+      status:    completing ? 'completed' : 'needs_action',
     });
   }
 
   _openEdit(uid) {
     const item = this._items.find(i => i.uid === uid);
     if (!item) return;
-    const meta     = parseMeta(item.description);
-    this._form     = { open: true, uid, title: item.summary, due: item.due ?? '', recur: meta.recur, remind: meta.remind };
-    this._picker   = null;
+    const meta   = parseMeta(item.description);
+    this._form   = { open: true, uid, title: item.summary, due: item.due ?? '', recur: meta.recur, remind: meta.remind };
+    this._picker = null;
     this._render();
   }
 
   _submit() {
-    const { uid, title, due, recur, remind } = this._form;
-    if (!title.trim()) return;
-    const desc = encodeMeta({ recur, remind }) || undefined;
+    // Read directly from DOM as well in case input event didn't fire
+    const inputEl = this.shadowRoot.querySelector('.form__input');
+    const title   = (inputEl ? inputEl.value : this._form.title).trim();
+    if (!title) return;
+
+    const { uid, due, recur, remind } = this._form;
+    const desc = encodeMeta({ recur, remind });
 
     if (uid) {
-      this._hass.callService('todo', 'update_item', {
-        entity_id:   this._config.entity,
-        item:        uid,
-        rename:      title.trim(),
-        due_date:    due || undefined,
-        description: desc,
-      });
+      const data = { entity_id: this._config.entity, item: uid, rename: title };
+      if (due)  data.due_date    = due;
+      if (desc) data.description = desc;
+      this._svc('update_item', data);
     } else {
-      this._hass.callService('todo', 'add_item', {
-        entity_id:   this._config.entity,
-        item:        title.trim(),
-        due_date:    due || undefined,
-        description: desc,
-      });
+      const data = { entity_id: this._config.entity, item: title };
+      if (due)  data.due_date    = due;
+      if (desc) data.description = desc;
+      this._svc('add_item', data);
     }
 
     this._form   = this._blankForm();
@@ -389,7 +392,7 @@ class AlhTodoCard extends HTMLElement {
   }
 
   _delete(uid) {
-    this._hass.callService('todo', 'remove_item', { entity_id: this._config.entity, item: uid });
+    this._svc('remove_item', { entity_id: this._config.entity, item: uid });
     this._form   = this._blankForm();
     this._picker = null;
     this._render();
