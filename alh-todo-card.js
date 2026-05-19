@@ -1,5 +1,29 @@
 // ─── Constants ────────────────────────────────────────────────────────────────
 
+const RECUR_DE_MAP = {
+  'täglich': 'daily',    'daily':    'daily',
+  'wöchentlich': 'weekly', 'weekly': 'weekly',
+  'monatlich': 'monthly', 'monthly': 'monthly',
+  'jährlich': 'yearly',  'yearly':  'yearly',
+  'werktags': 'weekdays', 'weekdays':'weekdays',
+};
+
+const REMIND_DE_MAP = {
+  'am fälligkeitstag': '0', '0': '0', 'heute': '0',
+  '1 tag vorher': '1',      '1': '1',
+};
+
+const CSV_TEMPLATE = [
+  'Titel;Fälligkeitsdatum;Wiederholung;Erinnerung',
+  'Zahnarzt anrufen;2026-06-01;wöchentlich;am Fälligkeitstag',
+  'Miete überweisen;2026-06-01;monatlich;1 Tag vorher',
+  'Steuererklärung;;jährlich;',
+  '# Wiederholung: täglich | wöchentlich | monatlich | jährlich | werktags',
+  '# Erinnerung: am Fälligkeitstag | 1 Tag vorher | (leer = keine)',
+  '# Datum: YYYY-MM-DD  (z.B. 2026-06-15) oder leer lassen',
+  '# Zeilen die mit # beginnen werden ignoriert',
+].join('\n');
+
 const RECUR_OPTS = [
   { v: '',         l: 'Keine Wiederholung' },
   { v: 'daily',    l: 'Täglich' },
@@ -88,7 +112,9 @@ class AlhTodoCard extends HTMLElement {
     this._showDone   = false;
     this._view       = 'all';  // 'all' | 'today' | 'week'
     this._bulkMode   = false;
+    this._bulkTab    = 'text'; // 'text' | 'csv'
     this._bulkText   = '';
+    this._csvItems   = [];
     this._form       = this._blankForm();
     this._picker     = null;
     this._unsubFn    = null;
@@ -253,14 +279,54 @@ class AlhTodoCard extends HTMLElement {
   }
 
   _bulkHtml() {
+    const isCSV = this._bulkTab === 'csv';
     return `
       <div class="bulk">
-        <textarea class="bulk__textarea" placeholder="Eine Aufgabe pro Zeile…" rows="6"></textarea>
-        <div class="bulk__actions">
-          <span class="bulk__hint">Eine Aufgabe pro Zeile</span>
-          <button class="btn btn--ghost" data-action="bulk-cancel">Abbrechen</button>
-          <button class="btn btn--primary" data-action="bulk-submit">Alle hinzufügen</button>
+        <div class="bulk-tabs">
+          <button class="bulk-tab${!isCSV ? ' bulk-tab--active' : ''}" data-bulk-tab="text">Text</button>
+          <button class="bulk-tab${isCSV  ? ' bulk-tab--active' : ''}" data-bulk-tab="csv">CSV-Vorlage</button>
         </div>
+
+        ${!isCSV ? `
+          <textarea class="bulk__textarea" placeholder="Eine Aufgabe pro Zeile…" rows="6"></textarea>
+          <div class="bulk__actions">
+            <span class="bulk__hint">Eine Aufgabe pro Zeile · ohne Datum/Erinnerung</span>
+            <button class="btn btn--ghost" data-action="bulk-cancel">Abbrechen</button>
+            <button class="btn btn--primary" data-action="bulk-submit">Alle hinzufügen</button>
+          </div>
+        ` : `
+          <div class="csv-zone">
+            <p class="csv-info">Vorlage herunterladen, in Excel/Numbers ausfüllen und hochladen.</p>
+            <div class="csv-btns">
+              <button class="btn btn--ghost" data-action="csv-download">Vorlage herunterladen (.csv)</button>
+              <label class="btn btn--ghost csv-upload-label">
+                CSV hochladen
+                <input type="file" accept=".csv,text/csv" class="csv-file-input" style="display:none" />
+              </label>
+            </div>
+            ${this._csvItems.length ? `
+              <div class="csv-preview">
+                <span class="csv-preview__count">${this._csvItems.length} Aufgabe${this._csvItems.length !== 1 ? 'n' : ''} erkannt</span>
+                <ul class="csv-preview__list">
+                  ${this._csvItems.map(it => `
+                    <li class="csv-preview__item">
+                      <span class="csv-preview__title">${x(it.title)}</span>
+                      <span class="csv-preview__meta">
+                        ${it.due  ? `<span class="item__due item__due--future">${x(it.due)}</span>` : ''}
+                        ${it.recur  ? `<span class="item__recur">↩ ${x(RECUR_OPTS.find(o=>o.v===it.recur)?.l ?? it.recur)}</span>` : ''}
+                        ${it.remind !== '' ? `<span class="item__recur">${x(REMIND_OPTS.find(o=>o.v===it.remind)?.l ?? '')}</span>` : ''}
+                      </span>
+                    </li>
+                  `).join('')}
+                </ul>
+              </div>
+              <div class="bulk__actions">
+                <button class="btn btn--ghost" data-action="bulk-cancel">Abbrechen</button>
+                <button class="btn btn--primary" data-action="bulk-submit">Alle hinzufügen</button>
+              </div>
+            ` : ''}
+          </div>
+        `}
       </div>
     `;
   }
@@ -371,17 +437,40 @@ class AlhTodoCard extends HTMLElement {
     root.querySelector('[data-action="toggle-bulk"]')?.addEventListener('click', () => {
       this._bulkMode = !this._bulkMode;
       this._bulkText = '';
+      this._csvItems = [];
       if (this._bulkMode) { this._form = this._blankForm(); this._picker = null; }
       this._render();
     });
 
+    root.querySelectorAll('[data-bulk-tab]').forEach(btn =>
+      btn.addEventListener('click', () => {
+        this._bulkTab  = btn.dataset.bulkTab;
+        this._csvItems = [];
+        this._render();
+      })
+    );
+
     root.querySelector('[data-action="bulk-cancel"]')?.addEventListener('click', () => {
       this._bulkMode = false;
       this._bulkText = '';
+      this._csvItems = [];
       this._render();
     });
 
     root.querySelector('[data-action="bulk-submit"]')?.addEventListener('click', () => this._bulkSubmit());
+
+    root.querySelector('[data-action="csv-download"]')?.addEventListener('click', () => this._downloadTemplate());
+
+    root.querySelector('.csv-file-input')?.addEventListener('change', e => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = ev => {
+        this._csvItems = this._parseCSV(ev.target.result);
+        this._render();
+      };
+      reader.readAsText(file, 'utf-8');
+    });
 
     root.querySelector('.bulk__textarea')?.addEventListener('input', e => {
       this._bulkText = e.target.value;
@@ -533,15 +622,50 @@ class AlhTodoCard extends HTMLElement {
   }
 
   _bulkSubmit() {
-    const ta    = this.shadowRoot.querySelector('.bulk__textarea');
-    const text  = ta ? ta.value : this._bulkText;
-    const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
-    lines.forEach(line => {
-      this._svc('add_item', { entity_id: this._config.entity, item: line });
-    });
+    if (this._bulkTab === 'csv') {
+      this._csvItems.forEach(it => {
+        const data = { entity_id: this._config.entity, item: it.title };
+        if (it.due)  data.due_date    = it.due;
+        const desc = encodeMeta({ recur: it.recur, remind: it.remind });
+        if (desc) data.description = desc;
+        this._svc('add_item', data);
+      });
+    } else {
+      const ta    = this.shadowRoot.querySelector('.bulk__textarea');
+      const text  = ta ? ta.value : this._bulkText;
+      text.split('\n').map(l => l.trim()).filter(Boolean).forEach(line => {
+        this._svc('add_item', { entity_id: this._config.entity, item: line });
+      });
+    }
     this._bulkMode = false;
     this._bulkText = '';
+    this._csvItems = [];
     this._render();
+  }
+
+  _downloadTemplate() {
+    const blob = new Blob([CSV_TEMPLATE], { type: 'text/csv;charset=utf-8;' });
+    const url  = URL.createObjectURL(blob);
+    const a    = Object.assign(document.createElement('a'), { href: url, download: 'aufgaben-vorlage.csv' });
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  _parseCSV(text) {
+    return text.split('\n')
+      .map(l => l.trim())
+      .filter(l => l && !l.startsWith('#'))
+      .slice(1) // skip header row
+      .map(line => {
+        const cols   = line.split(';').map(c => c.replace(/^"|"$/g, '').trim());
+        const title  = cols[0];
+        if (!title) return null;
+        const due    = cols[1] || '';
+        const recur  = RECUR_DE_MAP[(cols[2] || '').toLowerCase()] || '';
+        const remind = REMIND_DE_MAP[(cols[3] || '').toLowerCase()] ?? '';
+        return { title, due, recur, remind };
+      })
+      .filter(Boolean);
   }
 
   _delete(uid) {
@@ -707,6 +831,22 @@ class AlhTodoCard extends HTMLElement {
         padding: 12px 14px 14px;
         border-top: 1px solid rgba(128,128,128,0.12);
       }
+      .bulk-tabs {
+        display: flex; gap: 4px; margin-bottom: 10px;
+      }
+      .bulk-tab {
+        padding: 4px 12px; border-radius: 20px;
+        border: 1px solid rgba(128,128,128,0.18);
+        background: rgba(128,128,128,0.07);
+        font-size: 12px; font-weight: 500; font-family: inherit;
+        color: var(--secondary-text-color, currentColor);
+        cursor: pointer; transition: all 0.15s;
+      }
+      .bulk-tab--active {
+        border-color: var(--primary-color,#03a9f4);
+        background: rgba(var(--rgb-primary-color,3,169,244),0.12);
+        color: var(--primary-color,#03a9f4);
+      }
       .bulk__textarea {
         width: 100%; box-sizing: border-box;
         background: rgba(128,128,128,0.08);
@@ -727,6 +867,29 @@ class AlhTodoCard extends HTMLElement {
         font-size: 11px; color: var(--secondary-text-color, currentColor);
         opacity: 0.45; margin-right: auto;
       }
+      .csv-zone { display: flex; flex-direction: column; gap: 10px; }
+      .csv-info {
+        font-size: 13px; color: var(--secondary-text-color, currentColor);
+        opacity: 0.7; margin: 0;
+      }
+      .csv-btns { display: flex; gap: 8px; flex-wrap: wrap; }
+      .csv-upload-label { cursor: pointer; }
+      .csv-preview {
+        background: rgba(128,128,128,0.06);
+        border: 1px solid rgba(128,128,128,0.12);
+        border-radius: 10px; padding: 10px 12px;
+      }
+      .csv-preview__count {
+        font-size: 12px; font-weight: 600;
+        color: var(--primary-color,#03a9f4); display: block; margin-bottom: 8px;
+      }
+      .csv-preview__list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+      .csv-preview__item {
+        display: flex; align-items: center; gap: 8px;
+        font-size: 13px; color: var(--primary-text-color, currentColor);
+      }
+      .csv-preview__title { flex: 1; min-width: 0; word-break: break-word; }
+      .csv-preview__meta { display: flex; gap: 4px; flex-wrap: wrap; flex-shrink: 0; }
 
       /* ── Form ── */
       .form {
