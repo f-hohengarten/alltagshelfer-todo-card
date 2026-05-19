@@ -1,0 +1,627 @@
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+const RECUR_OPTS = [
+  { v: '',         l: 'Keine Wiederholung' },
+  { v: 'daily',    l: 'Täglich' },
+  { v: 'weekly',   l: 'Wöchentlich' },
+  { v: 'monthly',  l: 'Monatlich' },
+  { v: 'yearly',   l: 'Jährlich' },
+  { v: 'weekdays', l: 'Werktags (Mo–Fr)' },
+];
+
+const REMIND_OPTS = [
+  { v: '',  l: 'Keine Erinnerung' },
+  { v: '0', l: 'Am Fälligkeitstag (09:00)' },
+  { v: '1', l: '1 Tag vorher (09:00)' },
+];
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function parseMeta(desc) {
+  const m = String(desc ?? '').match(/^\[ALH ([^\]]*)\]([ \t]*)(.*)$/s);
+  if (!m) return { recur: '', remind: '', note: String(desc ?? '') };
+  const obj = {};
+  m[1].split(';').forEach(p => {
+    const i = p.indexOf(':');
+    if (i > 0) obj[p.slice(0, i).trim()] = p.slice(i + 1).trim();
+  });
+  return { recur: obj.recur ?? '', remind: obj.remind ?? '', note: m[3].trim() };
+}
+
+function encodeMeta({ recur, remind }) {
+  const p = [];
+  if (recur) p.push(`recur:${recur}`);
+  if (remind !== '') p.push(`remind:${remind}`);
+  return p.length ? `[ALH ${p.join(';')}]` : '';
+}
+
+function nextDue(dateStr, recur) {
+  if (!dateStr || !recur) return null;
+  const d = new Date(dateStr + 'T12:00:00');
+  if (recur === 'daily')    d.setDate(d.getDate() + 1);
+  if (recur === 'weekly')   d.setDate(d.getDate() + 7);
+  if (recur === 'monthly')  d.setMonth(d.getMonth() + 1);
+  if (recur === 'yearly')   d.setFullYear(d.getFullYear() + 1);
+  if (recur === 'weekdays') {
+    d.setDate(d.getDate() + 1);
+    while (d.getDay() === 0 || d.getDay() === 6) d.setDate(d.getDate() + 1);
+  }
+  return d.toISOString().slice(0, 10);
+}
+
+function fmtDue(dateStr) {
+  if (!dateStr) return null;
+  const d = new Date(dateStr + 'T12:00:00');
+  const t = new Date(); t.setHours(12, 0, 0, 0);
+  const diff = Math.round((d - t) / 86400000);
+  if (diff < 0)   return { txt: 'Überfällig', mod: 'overdue' };
+  if (diff === 0) return { txt: 'Heute',      mod: 'today' };
+  if (diff === 1) return { txt: 'Morgen',     mod: 'tomorrow' };
+  return { txt: d.toLocaleDateString('de-DE', { day: 'numeric', month: 'short' }), mod: 'future' };
+}
+
+function x(s) {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function isoToday() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+// ─── Component ────────────────────────────────────────────────────────────────
+
+class AlhTodoCard extends HTMLElement {
+  constructor() {
+    super();
+    this.attachShadow({ mode: 'open' });
+    this._items        = [];
+    this._config       = { entity: '', title: 'Aufgaben', show_completed: false };
+    this._hass         = null;
+    this._showDone     = false;
+    this._form         = this._blankForm();
+    this._picker       = null; // 'date' | 'recur' | 'remind' | null
+  }
+
+  _blankForm() {
+    return { open: false, uid: null, title: '', due: '', recur: '', remind: '' };
+  }
+
+  static getStubConfig() {
+    return { entity: 'todo.aufgaben', title: 'Aufgaben', show_completed: false };
+  }
+
+  setConfig(config) {
+    if (!config.entity) throw new Error('entity ist erforderlich');
+    this._config   = { title: 'Aufgaben', show_completed: false, ...config };
+    this._showDone = this._config.show_completed;
+    this._render();
+  }
+
+  set hass(hass) {
+    this._hass = hass;
+    const state = hass.states[this._config.entity];
+    if (!state) return;
+    const items = state.attributes.items ?? [];
+    if (JSON.stringify(items) !== JSON.stringify(this._items)) {
+      this._items = items;
+      this._render();
+    }
+  }
+
+  getCardSize() { return 4; }
+
+  // ─── Render ─────────────────────────────────────────────────────────────────
+
+  _render() {
+    // Preserve in-progress text input across re-renders triggered by hass updates
+    const inputEl = this.shadowRoot.querySelector('.form__input');
+    if (inputEl) this._form.title = inputEl.value;
+
+    const visible = this._items.filter(i => this._showDone || i.status === 'needs_action');
+    const openCnt = this._items.filter(i => i.status === 'needs_action').length;
+
+    this.shadowRoot.innerHTML = `
+      <style>${this._css()}</style>
+      <div class="card">
+        ${this._header(openCnt)}
+        ${visible.length ? `<ul class="list">${visible.map(i => this._item(i)).join('')}</ul>` : this._empty()}
+        ${this._form.open ? this._formHtml() : ''}
+      </div>
+    `;
+
+    this._bind();
+
+    if (this._form.open) {
+      const inp = this.shadowRoot.querySelector('.form__input');
+      if (inp) { inp.selectionStart = inp.selectionEnd = inp.value.length; inp.focus(); }
+    }
+  }
+
+  _header(openCnt) {
+    return `
+      <div class="header">
+        <div class="header__left">
+          <div class="header__icon">
+            <svg viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+          </div>
+          <span class="header__title">${x(this._config.title)}</span>
+        </div>
+        <div class="header__right">
+          ${openCnt > 0 ? `<span class="badge">${openCnt}</span>` : ''}
+          <button class="icon-btn${this._showDone ? ' icon-btn--active' : ''}" data-action="toggle-done" title="Erledigte anzeigen">
+            <svg viewBox="0 0 24 24"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
+          </button>
+          <button class="add-btn" data-action="open-add" aria-label="Aufgabe hinzufügen">
+            <svg viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
+          </button>
+        </div>
+      </div>
+    `;
+  }
+
+  _empty() {
+    return '<div class="empty">Keine offenen Aufgaben</div>';
+  }
+
+  _item(item) {
+    const done  = item.status === 'completed';
+    const meta  = parseMeta(item.description);
+    const due   = fmtDue(item.due);
+    const rLbl  = meta.recur ? RECUR_OPTS.find(o => o.v === meta.recur)?.l : null;
+    const hasMeta = due || rLbl;
+    return `
+      <li class="item${done ? ' item--done' : ''}${due?.mod === 'overdue' ? ' item--overdue' : ''}" data-uid="${x(item.uid)}">
+        <button class="item__check" data-action="toggle" data-uid="${x(item.uid)}" aria-label="${done ? 'Wiederherstellen' : 'Erledigen'}">
+          <svg viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+        </button>
+        <button class="item__body" data-action="edit" data-uid="${x(item.uid)}">
+          <span class="item__label">${x(item.summary)}</span>
+          ${hasMeta ? `
+            <div class="item__meta">
+              ${due  ? `<span class="item__due item__due--${due.mod}">${due.txt}</span>` : ''}
+              ${rLbl ? `<span class="item__recur">↩ ${x(rLbl)}</span>` : ''}
+            </div>` : ''}
+        </button>
+      </li>
+    `;
+  }
+
+  _formHtml() {
+    const { uid, title, due, recur, remind } = this._form;
+    const isEdit  = uid !== null;
+    const rLabel  = recur  ? RECUR_OPTS.find(o => o.v === recur)?.l  : null;
+    const rmLabel = remind !== '' ? REMIND_OPTS.find(o => o.v === remind)?.l : null;
+
+    return `
+      <div class="form">
+        <input class="form__input" type="text" placeholder="Aufgabe hinzufügen…"
+          value="${x(title)}" maxlength="255" />
+
+        <div class="form__chips">
+          <button class="chip${due ? ' chip--on' : ''}" data-picker="date">
+            <svg viewBox="0 0 24 24"><path d="M17 12h-5v5h5v-5zM16 1v2H8V1H6v2H5c-1.11 0-1.99.9-1.99 2L3 19c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2h-1V1h-2zm3 18H5V8h14v11z"/></svg>
+            <span>${due ? x(due) : 'Datum'}</span>
+          </button>
+          <button class="chip${recur ? ' chip--on' : ''}" data-picker="recur">
+            <svg viewBox="0 0 24 24"><path d="M12 5V1L7 6l5 5V7c3.31 0 6 2.69 6 6s-2.69 6-6 6-6-2.69-6-6H4c0 4.42 3.58 8 8 8s8-3.58 8-8-3.58-8-8-8z"/></svg>
+            <span>${rLabel ? x(rLabel) : 'Wiederholen'}</span>
+          </button>
+          <button class="chip${remind !== '' ? ' chip--on' : ''}${!due ? ' chip--off' : ''}"
+            data-picker="remind" ${!due ? 'disabled' : ''}>
+            <svg viewBox="0 0 24 24"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg>
+            <span>${rmLabel ? x(rmLabel) : 'Erinnern'}</span>
+          </button>
+        </div>
+
+        ${this._picker === 'date' ? `
+          <div class="picker">
+            <input class="picker__date" type="date" value="${x(due)}" min="${isoToday()}" />
+            ${due ? `<button class="picker__clear" data-clear="date">Datum entfernen</button>` : ''}
+          </div>` : ''}
+
+        ${this._picker === 'recur' ? `
+          <div class="picker picker--grid">
+            ${RECUR_OPTS.map(o => `
+              <button class="pill${recur === o.v ? ' pill--on' : ''}" data-recur="${x(o.v)}">${x(o.l)}</button>
+            `).join('')}
+          </div>` : ''}
+
+        ${this._picker === 'remind' ? `
+          <div class="picker picker--grid">
+            ${REMIND_OPTS.map(o => `
+              <button class="pill${remind === o.v ? ' pill--on' : ''}" data-remind="${x(o.v)}">${x(o.l)}</button>
+            `).join('')}
+          </div>` : ''}
+
+        <div class="form__actions">
+          ${isEdit ? `<button class="btn btn--danger" data-action="delete">Löschen</button>` : ''}
+          <button class="btn btn--ghost" data-action="cancel">Abbrechen</button>
+          <button class="btn btn--primary" data-action="submit">${isEdit ? 'Speichern' : 'Hinzufügen'}</button>
+        </div>
+      </div>
+    `;
+  }
+
+  // ─── Events ─────────────────────────────────────────────────────────────────
+
+  _bind() {
+    const root = this.shadowRoot;
+
+    root.querySelector('[data-action="open-add"]')?.addEventListener('click', () => {
+      this._form   = this._blankForm();
+      this._form.open = true;
+      this._picker = null;
+      this._render();
+    });
+
+    root.querySelector('[data-action="toggle-done"]')?.addEventListener('click', () => {
+      this._showDone = !this._showDone;
+      this._render();
+    });
+
+    root.querySelectorAll('[data-action="toggle"]').forEach(btn =>
+      btn.addEventListener('click', e => { e.stopPropagation(); this._toggle(btn.dataset.uid); })
+    );
+
+    root.querySelectorAll('[data-action="edit"]').forEach(btn =>
+      btn.addEventListener('click', () => this._openEdit(btn.dataset.uid))
+    );
+
+    root.querySelector('[data-action="cancel"]')?.addEventListener('click', () => {
+      this._form   = this._blankForm();
+      this._picker = null;
+      this._render();
+    });
+
+    root.querySelector('[data-action="submit"]')?.addEventListener('click', () => this._submit());
+
+    root.querySelector('[data-action="delete"]')?.addEventListener('click', () => {
+      if (this._form.uid) this._delete(this._form.uid);
+    });
+
+    root.querySelectorAll('[data-picker]').forEach(btn =>
+      btn.addEventListener('click', () => {
+        this._picker = this._picker === btn.dataset.picker ? null : btn.dataset.picker;
+        this._render();
+      })
+    );
+
+    root.querySelector('.picker__date')?.addEventListener('change', e => {
+      this._form.due = e.target.value;
+      this._picker   = null;
+      this._render();
+    });
+
+    root.querySelector('[data-clear="date"]')?.addEventListener('click', () => {
+      this._form.due    = '';
+      this._form.remind = '';
+      this._picker      = null;
+      this._render();
+    });
+
+    root.querySelectorAll('[data-recur]').forEach(btn =>
+      btn.addEventListener('click', () => {
+        this._form.recur = btn.dataset.recur;
+        this._picker     = null;
+        this._render();
+      })
+    );
+
+    root.querySelectorAll('[data-remind]').forEach(btn =>
+      btn.addEventListener('click', () => {
+        this._form.remind = btn.dataset.remind;
+        this._picker      = null;
+        this._render();
+      })
+    );
+
+    const inp = root.querySelector('.form__input');
+    if (inp) {
+      inp.addEventListener('input',   e => { this._form.title = e.target.value; });
+      inp.addEventListener('keydown', e => {
+        if (e.key === 'Enter'  && this._form.title.trim()) this._submit();
+        if (e.key === 'Escape') { this._form = this._blankForm(); this._picker = null; this._render(); }
+      });
+    }
+  }
+
+  // ─── Services ───────────────────────────────────────────────────────────────
+
+  _toggle(uid) {
+    const item = this._items.find(i => i.uid === uid);
+    if (!item) return;
+    const meta      = parseMeta(item.description);
+    const completing = item.status === 'needs_action';
+
+    if (completing && meta.recur) {
+      const nd = nextDue(item.due, meta.recur);
+      this._hass.callService('todo', 'add_item', {
+        entity_id: this._config.entity,
+        item:        item.summary,
+        due_date:    nd ?? undefined,
+        description: encodeMeta(meta) || undefined,
+      });
+    }
+
+    this._hass.callService('todo', 'update_item', {
+      entity_id: this._config.entity,
+      item:   uid,
+      status: completing ? 'completed' : 'needs_action',
+    });
+  }
+
+  _openEdit(uid) {
+    const item = this._items.find(i => i.uid === uid);
+    if (!item) return;
+    const meta     = parseMeta(item.description);
+    this._form     = { open: true, uid, title: item.summary, due: item.due ?? '', recur: meta.recur, remind: meta.remind };
+    this._picker   = null;
+    this._render();
+  }
+
+  _submit() {
+    const { uid, title, due, recur, remind } = this._form;
+    if (!title.trim()) return;
+    const desc = encodeMeta({ recur, remind }) || undefined;
+
+    if (uid) {
+      this._hass.callService('todo', 'update_item', {
+        entity_id:   this._config.entity,
+        item:        uid,
+        rename:      title.trim(),
+        due_date:    due || undefined,
+        description: desc,
+      });
+    } else {
+      this._hass.callService('todo', 'add_item', {
+        entity_id:   this._config.entity,
+        item:        title.trim(),
+        due_date:    due || undefined,
+        description: desc,
+      });
+    }
+
+    this._form   = this._blankForm();
+    this._picker = null;
+    this._render();
+  }
+
+  _delete(uid) {
+    this._hass.callService('todo', 'remove_item', { entity_id: this._config.entity, item: uid });
+    this._form   = this._blankForm();
+    this._picker = null;
+    this._render();
+  }
+
+  // ─── Styles ─────────────────────────────────────────────────────────────────
+
+  _css() {
+    return `
+      :host { display: block; }
+
+      .card {
+        background: var(--ha-card-background, var(--card-background-color, #1c1c1e));
+        border-radius: var(--ha-card-border-radius, 16px);
+        border: 1px solid rgba(128,128,128,0.15);
+        backdrop-filter: blur(10px) saturate(1.2);
+        -webkit-backdrop-filter: blur(10px) saturate(1.2);
+        box-shadow: var(--ha-card-box-shadow, 0 12px 28px rgba(0,0,0,0.22));
+        overflow: hidden;
+        font-family: var(--primary-font-family, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
+      }
+
+      /* ── Header ── */
+      .header {
+        display: flex; align-items: center; justify-content: space-between;
+        padding: 14px 16px 10px;
+      }
+      .header__left  { display: flex; align-items: center; gap: 10px; }
+      .header__right { display: flex; align-items: center; gap: 6px; }
+
+      .header__icon {
+        width: 32px; height: 32px; border-radius: 8px; flex-shrink: 0;
+        background: rgba(var(--rgb-primary-color, 3,169,244), 0.15);
+        display: flex; align-items: center; justify-content: center;
+      }
+      .header__icon svg { width: 16px; height: 16px; fill: var(--primary-color, #03a9f4); }
+      .header__title {
+        font-size: 15px; font-weight: 600;
+        color: var(--primary-text-color, currentColor);
+      }
+
+      .badge {
+        font-size: 12px; font-weight: 600;
+        color: var(--primary-color, #03a9f4);
+        background: rgba(var(--rgb-primary-color, 3,169,244), 0.15);
+        border-radius: 20px; padding: 2px 8px;
+      }
+
+      .icon-btn {
+        width: 30px; height: 30px; border-radius: 8px;
+        background: rgba(128,128,128,0.1); border: none; cursor: pointer;
+        display: flex; align-items: center; justify-content: center; padding: 0;
+        transition: background 0.15s;
+      }
+      .icon-btn svg { width: 16px; height: 16px; fill: var(--secondary-text-color, currentColor); opacity: 0.5; }
+      .icon-btn:hover, .icon-btn--active { background: rgba(var(--rgb-primary-color,3,169,244), 0.12); }
+      .icon-btn--active svg { fill: var(--primary-color,#03a9f4); opacity: 1; }
+
+      .add-btn {
+        width: 30px; height: 30px; border-radius: 8px;
+        background: var(--primary-color, #03a9f4); border: none; cursor: pointer;
+        display: flex; align-items: center; justify-content: center; padding: 0;
+        transition: opacity 0.15s;
+      }
+      .add-btn:hover { opacity: 0.82; }
+      .add-btn svg { width: 16px; height: 16px; fill: #fff; }
+
+      /* ── List ── */
+      .list { list-style: none; margin: 0; padding: 0 8px 8px; }
+
+      .item {
+        display: flex; align-items: center; gap: 10px;
+        padding: 2px 4px; border-radius: 10px;
+        transition: background 0.1s;
+      }
+      .item + .item { border-top: 1px solid rgba(128,128,128,0.1); border-radius: 0; }
+      .item:last-child { border-radius: 0 0 8px 8px; }
+      .item:first-child { border-radius: 8px 8px 0 0; }
+      .item:only-child  { border-radius: 8px; }
+      .item:hover { background: rgba(128,128,128,0.06); }
+
+      .item__check {
+        width: 22px; height: 22px; flex-shrink: 0; border-radius: 50%;
+        border: 2px solid rgba(128,128,128,0.35); background: transparent;
+        cursor: pointer; display: flex; align-items: center; justify-content: center;
+        padding: 0; transition: all 0.15s;
+      }
+      .item__check svg { width: 12px; height: 12px; fill: #fff; opacity: 0; transition: opacity 0.15s; }
+      .item:hover .item__check { border-color: var(--primary-color, #03a9f4); }
+      .item--done .item__check {
+        background: var(--primary-color, #03a9f4);
+        border-color: var(--primary-color, #03a9f4);
+      }
+      .item--done .item__check svg { opacity: 1; }
+
+      .item__body {
+        flex: 1; min-width: 0; background: none; border: none;
+        cursor: pointer; text-align: left; padding: 9px 4px;
+      }
+      .item__label {
+        display: block; font-size: 14px; line-height: 1.4;
+        color: var(--primary-text-color, currentColor); word-break: break-word;
+      }
+      .item--done .item__label {
+        color: var(--secondary-text-color, currentColor); opacity: 0.5;
+        text-decoration: line-through;
+      }
+      .item--overdue .item__label { color: var(--error-color, #f44336); }
+
+      .item__meta { display: flex; gap: 5px; margin-top: 3px; flex-wrap: wrap; }
+
+      .item__due, .item__recur {
+        font-size: 11px; font-weight: 500;
+        padding: 1px 6px; border-radius: 4px; white-space: nowrap;
+      }
+      .item__due--overdue  { color: var(--error-color,#f44336);   background: rgba(244,67,54,0.12); }
+      .item__due--today    { color: var(--primary-color,#03a9f4); background: rgba(var(--rgb-primary-color,3,169,244),0.12); }
+      .item__due--tomorrow { color: #ff9500;                      background: rgba(255,149,0,0.12); }
+      .item__due--future   { color: var(--secondary-text-color,currentColor); opacity:0.65; background: rgba(128,128,128,0.1); }
+      .item__recur         { color: var(--secondary-text-color,currentColor); opacity:0.55; background: rgba(128,128,128,0.08); }
+
+      /* ── Empty ── */
+      .empty {
+        padding: 28px 20px; text-align: center; font-size: 13px;
+        color: var(--secondary-text-color, currentColor); opacity: 0.5;
+      }
+
+      /* ── Form ── */
+      .form {
+        padding: 12px 14px 14px;
+        border-top: 1px solid rgba(128,128,128,0.12);
+      }
+
+      .form__input {
+        width: 100%; box-sizing: border-box;
+        background: rgba(128,128,128,0.08);
+        border: 1px solid rgba(128,128,128,0.15);
+        border-radius: 10px; padding: 10px 14px;
+        font-size: 14px; font-family: inherit;
+        color: var(--primary-text-color, currentColor);
+        outline: none; transition: border-color 0.15s;
+      }
+      .form__input::placeholder { color: var(--secondary-text-color, currentColor); opacity: 0.4; }
+      .form__input:focus { border-color: var(--primary-color, #03a9f4); }
+
+      .form__chips { display: flex; gap: 6px; margin-top: 10px; flex-wrap: wrap; }
+
+      .chip {
+        display: flex; align-items: center; gap: 5px;
+        padding: 5px 10px; border-radius: 20px;
+        border: 1px solid rgba(128,128,128,0.2);
+        background: rgba(128,128,128,0.07);
+        font-size: 12px; font-weight: 500; font-family: inherit;
+        color: var(--secondary-text-color, currentColor);
+        cursor: pointer; transition: all 0.15s; white-space: nowrap;
+      }
+      .chip svg { width: 13px; height: 13px; fill: currentColor; flex-shrink: 0; }
+      .chip:hover { border-color: var(--primary-color,#03a9f4); color: var(--primary-color,#03a9f4); }
+      .chip--on {
+        border-color: var(--primary-color,#03a9f4);
+        background: rgba(var(--rgb-primary-color,3,169,244),0.12);
+        color: var(--primary-color,#03a9f4);
+      }
+      .chip--off { opacity: 0.35; pointer-events: none; }
+
+      /* ── Pickers ── */
+      .picker { margin-top: 8px; }
+      .picker--grid { display: flex; flex-wrap: wrap; gap: 6px; }
+
+      .picker__date {
+        width: 100%; box-sizing: border-box;
+        background: rgba(128,128,128,0.08);
+        border: 1px solid rgba(128,128,128,0.15);
+        border-radius: 10px; padding: 9px 14px;
+        font-size: 14px; font-family: inherit;
+        color: var(--primary-text-color, currentColor);
+        outline: none;
+      }
+      @media (prefers-color-scheme: dark) { .picker__date { color-scheme: dark; } }
+
+      .picker__clear {
+        margin-top: 6px; background: none; border: none;
+        font-size: 12px; color: var(--error-color, #f44336);
+        cursor: pointer; padding: 2px 0; font-family: inherit;
+      }
+      .picker__clear:hover { text-decoration: underline; }
+
+      .pill {
+        padding: 5px 12px; border-radius: 20px;
+        border: 1px solid rgba(128,128,128,0.2);
+        background: rgba(128,128,128,0.07);
+        font-size: 12px; font-weight: 500; font-family: inherit;
+        color: var(--secondary-text-color, currentColor);
+        cursor: pointer; transition: all 0.15s; white-space: nowrap;
+      }
+      .pill:hover { border-color: var(--primary-color,#03a9f4); color: var(--primary-color,#03a9f4); }
+      .pill--on {
+        border-color: var(--primary-color,#03a9f4);
+        background: rgba(var(--rgb-primary-color,3,169,244),0.15);
+        color: var(--primary-color,#03a9f4);
+      }
+
+      /* ── Form actions ── */
+      .form__actions {
+        display: flex; gap: 8px; margin-top: 12px; justify-content: flex-end;
+      }
+
+      .btn {
+        padding: 8px 16px; border-radius: 8px;
+        font-size: 13px; font-weight: 600; font-family: inherit;
+        cursor: pointer; border: none; transition: all 0.15s;
+      }
+      .btn--primary { background: var(--primary-color,#03a9f4); color: #fff; }
+      .btn--primary:hover { opacity: 0.82; }
+      .btn--ghost {
+        background: rgba(128,128,128,0.1); color: var(--secondary-text-color,currentColor);
+        border: 1px solid rgba(128,128,128,0.18);
+      }
+      .btn--ghost:hover { background: rgba(128,128,128,0.18); }
+      .btn--danger { background: rgba(244,67,54,0.1); color: var(--error-color,#f44336); margin-right: auto; }
+      .btn--danger:hover { background: rgba(244,67,54,0.2); }
+    `;
+  }
+}
+
+// ─── Registration ─────────────────────────────────────────────────────────────
+
+customElements.define('alh-todo-card', AlhTodoCard);
+
+window.customCards = window.customCards || [];
+window.customCards.push({
+  type:        'alh-todo-card',
+  name:        'Alltagshelfer Todo Card',
+  description: 'Aufgaben mit Fälligkeitsdaten, Wiederholungen und Erinnerungen.',
+});
