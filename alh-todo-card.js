@@ -121,12 +121,12 @@ class AlhTodoCard extends HTMLElement {
     await this._fetchItems();
     try {
       this._unsubFn = await this._hass.connection.subscribeEvents(
-        async (event) => {
+        (event) => {
           if (event.data.entity_id === this._config.entity) {
-            await this._fetchItems();
+            this._fetchItems();
           }
         },
-        'todo_item_list_updated'
+        'state_changed'
       );
     } catch (e) {
       console.warn('[alh-todo-card] subscribeEvents fehlgeschlagen', e);
