@@ -118,20 +118,34 @@ class AlhTodoCard extends HTMLElement {
 
   async _subscribe() {
     if (this._unsubFn) { this._unsubFn(); this._unsubFn = null; }
+    await this._fetchItems();
     try {
-      this._unsubFn = await this._hass.connection.subscribeMessage(
-        (result) => {
-          this._items = result.items ?? [];
-          this._render();
+      this._unsubFn = await this._hass.connection.subscribeEvents(
+        async (event) => {
+          if (event.data.entity_id === this._config.entity) {
+            await this._fetchItems();
+          }
         },
-        { type: 'todo/subscribe_todo_items', entity_id: this._config.entity }
+        'todo_updated'
       );
     } catch (e) {
-      // Fallback für ältere HA-Versionen: Items aus State-Attributen lesen
+      console.warn('[alh-todo-card] subscribeEvents fehlgeschlagen', e);
+    }
+  }
+
+  async _fetchItems() {
+    try {
+      const result = await this._hass.callWS({
+        type:      'todo/get_items',
+        entity_id: this._config.entity,
+        status:    ['needs_action', 'completed'],
+      });
+      this._items = result.items ?? [];
+    } catch (e) {
       const state = this._hass.states[this._config.entity];
       this._items = state?.attributes?.items ?? [];
-      this._render();
     }
+    this._render();
   }
 
   getCardSize() { return 4; }
