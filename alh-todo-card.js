@@ -70,19 +70,28 @@ function isoToday() {
   return new Date().toISOString().slice(0, 10);
 }
 
+function isoPlus(days) {
+  const d = new Date();
+  d.setDate(d.getDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 class AlhTodoCard extends HTMLElement {
   constructor() {
     super();
     this.attachShadow({ mode: 'open' });
-    this._items        = [];
-    this._config       = { entity: '', title: 'Aufgaben', show_completed: false };
-    this._hass         = null;
-    this._showDone     = false;
-    this._form         = this._blankForm();
-    this._picker       = null;
-    this._unsubFn      = null;
+    this._items      = [];
+    this._config     = { entity: '', title: 'Aufgaben', show_completed: false };
+    this._hass       = null;
+    this._showDone   = false;
+    this._view       = 'all';  // 'all' | 'today' | 'week'
+    this._bulkMode   = false;
+    this._bulkText   = '';
+    this._form       = this._blankForm();
+    this._picker     = null;
+    this._unsubFn    = null;
   }
 
   _blankForm() {
@@ -139,8 +148,8 @@ class AlhTodoCard extends HTMLElement {
         'todo', 'get_items',
         { status: ['needs_action', 'completed'] },
         { entity_id: this._config.entity },
-        false, // notifyOnError
-        true   // returnResponse
+        false,
+        true
       );
       this._items = result.response?.[this._config.entity]?.items ?? [];
     } catch (e) {
@@ -154,20 +163,38 @@ class AlhTodoCard extends HTMLElement {
 
   // ─── Render ─────────────────────────────────────────────────────────────────
 
+  _filterByView(items) {
+    if (this._view === 'all') return items;
+    const today   = isoToday();
+    const weekEnd = isoPlus(7);
+    return items.filter(i => {
+      if (!i.due) return true;
+      if (this._view === 'today') return i.due <= today;
+      if (this._view === 'week')  return i.due <= weekEnd;
+      return true;
+    });
+  }
+
   _render() {
-    // Preserve in-progress text input across re-renders triggered by hass updates
     const inputEl = this.shadowRoot.querySelector('.form__input');
     if (inputEl) this._form.title = inputEl.value;
 
-    const visible = this._items.filter(i => this._showDone || i.status === 'needs_action');
-    const openCnt = this._items.filter(i => i.status === 'needs_action').length;
+    const bulkEl = this.shadowRoot.querySelector('.bulk__textarea');
+    if (bulkEl) this._bulkText = bulkEl.value;
+
+    const active   = this._items.filter(i => i.status === 'needs_action');
+    const openCnt  = active.length;
+    const filtered = this._filterByView(this._showDone ? this._items : active);
 
     this.shadowRoot.innerHTML = `
       <style>${this._css()}</style>
       <div class="card">
         ${this._header(openCnt)}
-        ${visible.length ? `<ul class="list">${visible.map(i => this._item(i)).join('')}</ul>` : this._empty()}
-        ${this._form.open ? this._formHtml() : ''}
+        ${this._bulkMode ? this._bulkHtml() : `
+          ${this._viewTabs()}
+          ${filtered.length ? `<ul class="list">${filtered.map(i => this._item(i)).join('')}</ul>` : this._empty()}
+          ${this._form.open ? this._formHtml() : ''}
+        `}
       </div>
     `;
 
@@ -176,6 +203,10 @@ class AlhTodoCard extends HTMLElement {
     if (this._form.open) {
       const inp = this.shadowRoot.querySelector('.form__input');
       if (inp) { inp.selectionStart = inp.selectionEnd = inp.value.length; inp.focus(); }
+    }
+    if (this._bulkMode) {
+      const ta = this.shadowRoot.querySelector('.bulk__textarea');
+      if (ta) { ta.value = this._bulkText; ta.focus(); }
     }
   }
 
@@ -190,19 +221,57 @@ class AlhTodoCard extends HTMLElement {
         </div>
         <div class="header__right">
           ${openCnt > 0 ? `<span class="badge">${openCnt}</span>` : ''}
+          <button class="icon-btn${this._bulkMode ? ' icon-btn--active' : ''}" data-action="toggle-bulk" title="Mehrere hinzufügen">
+            <svg viewBox="0 0 24 24"><path d="M3 13h2v-2H3v2zm0 4h2v-2H3v2zm0-8h2V7H3v2zm4 4h14v-2H7v2zm0 4h14v-2H7v2zM7 7v2h14V7H7z"/></svg>
+          </button>
           <button class="icon-btn${this._showDone ? ' icon-btn--active' : ''}" data-action="toggle-done" title="Erledigte anzeigen">
             <svg viewBox="0 0 24 24"><path d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8c-1.66 0-3 1.34-3 3s1.34 3 3 3 3-1.34 3-3-1.34-3-3-3z"/></svg>
           </button>
-          <button class="add-btn" data-action="open-add" aria-label="Aufgabe hinzufügen">
-            <svg viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
-          </button>
+          ${!this._bulkMode ? `
+            <button class="add-btn" data-action="open-add" aria-label="Aufgabe hinzufügen">
+              <svg viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg>
+            </button>
+          ` : ''}
+        </div>
+      </div>
+    `;
+  }
+
+  _viewTabs() {
+    const tabs = [
+      { v: 'all',   l: 'Alle' },
+      { v: 'today', l: 'Heute' },
+      { v: 'week',  l: 'Woche' },
+    ];
+    return `
+      <div class="view-tabs">
+        ${tabs.map(t => `
+          <button class="view-tab${this._view === t.v ? ' view-tab--active' : ''}" data-view="${t.v}">${t.l}</button>
+        `).join('')}
+      </div>
+    `;
+  }
+
+  _bulkHtml() {
+    return `
+      <div class="bulk">
+        <textarea class="bulk__textarea" placeholder="Eine Aufgabe pro Zeile…" rows="6"></textarea>
+        <div class="bulk__actions">
+          <span class="bulk__hint">Eine Aufgabe pro Zeile</span>
+          <button class="btn btn--ghost" data-action="bulk-cancel">Abbrechen</button>
+          <button class="btn btn--primary" data-action="bulk-submit">Alle hinzufügen</button>
         </div>
       </div>
     `;
   }
 
   _empty() {
-    return '<div class="empty">Keine offenen Aufgaben</div>';
+    const msgs = {
+      all:   'Keine offenen Aufgaben',
+      today: 'Nichts für heute fällig',
+      week:  'Nichts für diese Woche fällig',
+    };
+    return `<div class="empty">${msgs[this._view] ?? 'Keine offenen Aufgaben'}</div>`;
   }
 
   _item(item) {
@@ -292,10 +361,36 @@ class AlhTodoCard extends HTMLElement {
   _bind() {
     const root = this.shadowRoot;
 
+    root.querySelectorAll('[data-view]').forEach(btn =>
+      btn.addEventListener('click', () => {
+        this._view = btn.dataset.view;
+        this._render();
+      })
+    );
+
+    root.querySelector('[data-action="toggle-bulk"]')?.addEventListener('click', () => {
+      this._bulkMode = !this._bulkMode;
+      this._bulkText = '';
+      if (this._bulkMode) { this._form = this._blankForm(); this._picker = null; }
+      this._render();
+    });
+
+    root.querySelector('[data-action="bulk-cancel"]')?.addEventListener('click', () => {
+      this._bulkMode = false;
+      this._bulkText = '';
+      this._render();
+    });
+
+    root.querySelector('[data-action="bulk-submit"]')?.addEventListener('click', () => this._bulkSubmit());
+
+    root.querySelector('.bulk__textarea')?.addEventListener('input', e => {
+      this._bulkText = e.target.value;
+    });
+
     root.querySelector('[data-action="open-add"]')?.addEventListener('click', () => {
-      this._form   = this._blankForm();
+      this._form      = this._blankForm();
       this._form.open = true;
-      this._picker = null;
+      this._picker    = null;
       this._render();
     });
 
@@ -413,7 +508,6 @@ class AlhTodoCard extends HTMLElement {
   }
 
   _submit() {
-    // Read directly from DOM as well in case input event didn't fire
     const inputEl = this.shadowRoot.querySelector('.form__input');
     const title   = (inputEl ? inputEl.value : this._form.title).trim();
     if (!title) return;
@@ -435,6 +529,18 @@ class AlhTodoCard extends HTMLElement {
 
     this._form   = this._blankForm();
     this._picker = null;
+    this._render();
+  }
+
+  _bulkSubmit() {
+    const ta    = this.shadowRoot.querySelector('.bulk__textarea');
+    const text  = ta ? ta.value : this._bulkText;
+    const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+    lines.forEach(line => {
+      this._svc('add_item', { entity_id: this._config.entity, item: line });
+    });
+    this._bulkMode = false;
+    this._bulkText = '';
     this._render();
   }
 
@@ -507,6 +613,25 @@ class AlhTodoCard extends HTMLElement {
       .add-btn:hover { opacity: 0.82; }
       .add-btn svg { width: 16px; height: 16px; fill: #fff; }
 
+      /* ── View Tabs ── */
+      .view-tabs {
+        display: flex; gap: 4px; padding: 0 14px 10px;
+      }
+      .view-tab {
+        padding: 4px 12px; border-radius: 20px;
+        border: 1px solid rgba(128,128,128,0.18);
+        background: rgba(128,128,128,0.07);
+        font-size: 12px; font-weight: 500; font-family: inherit;
+        color: var(--secondary-text-color, currentColor);
+        cursor: pointer; transition: all 0.15s;
+      }
+      .view-tab:hover { border-color: var(--primary-color,#03a9f4); color: var(--primary-color,#03a9f4); }
+      .view-tab--active {
+        border-color: var(--primary-color,#03a9f4);
+        background: rgba(var(--rgb-primary-color,3,169,244),0.12);
+        color: var(--primary-color,#03a9f4);
+      }
+
       /* ── List ── */
       .list { list-style: none; margin: 0; padding: 0 8px 8px; }
 
@@ -575,6 +700,32 @@ class AlhTodoCard extends HTMLElement {
       .empty {
         padding: 28px 20px; text-align: center; font-size: 13px;
         color: var(--secondary-text-color, currentColor); opacity: 0.5;
+      }
+
+      /* ── Bulk ── */
+      .bulk {
+        padding: 12px 14px 14px;
+        border-top: 1px solid rgba(128,128,128,0.12);
+      }
+      .bulk__textarea {
+        width: 100%; box-sizing: border-box;
+        background: rgba(128,128,128,0.08);
+        border: 1px solid rgba(128,128,128,0.15);
+        border-radius: 10px; padding: 10px 14px;
+        font-size: 14px; font-family: inherit; line-height: 1.6;
+        color: var(--primary-text-color, currentColor);
+        outline: none; transition: border-color 0.15s;
+        resize: vertical; min-height: 100px;
+      }
+      .bulk__textarea::placeholder { color: var(--secondary-text-color, currentColor); opacity: 0.4; }
+      .bulk__textarea:focus { border-color: var(--primary-color, #03a9f4); }
+      .bulk__actions {
+        display: flex; gap: 8px; margin-top: 10px;
+        align-items: center;
+      }
+      .bulk__hint {
+        font-size: 11px; color: var(--secondary-text-color, currentColor);
+        opacity: 0.45; margin-right: auto;
       }
 
       /* ── Form ── */
