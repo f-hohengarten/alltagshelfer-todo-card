@@ -135,15 +135,17 @@ class AlhTodoCard extends HTMLElement {
 
   async _fetchItems() {
     try {
-      const result = await this._hass.callWS({
-        type:      'todo/get_items',
-        entity_id: this._config.entity,
-        status:    ['needs_action', 'completed'],
-      });
-      this._items = result.items ?? [];
+      const result = await this._hass.callService(
+        'todo', 'get_items',
+        { status: ['needs_action', 'completed'] },
+        { entity_id: this._config.entity },
+        false, // notifyOnError
+        true   // returnResponse
+      );
+      this._items = result.response?.[this._config.entity]?.items ?? [];
     } catch (e) {
-      const state = this._hass.states[this._config.entity];
-      this._items = state?.attributes?.items ?? [];
+      console.error('[alh-todo-card] fetchItems:', e);
+      this._items = this._hass.states[this._config.entity]?.attributes?.items ?? [];
     }
     this._render();
   }
