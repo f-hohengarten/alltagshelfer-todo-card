@@ -110,11 +110,14 @@ class AlhTodoCard extends HTMLElement {
     this._config     = { entity: '', title: 'Aufgaben', show_completed: false };
     this._hass       = null;
     this._showDone   = false;
-    this._view       = 'all';  // 'all' | 'today' | 'week'
+    this._view       = 'all';  // 'all' | 'today' | 'week' | 'cal'
     this._bulkMode   = false;
     this._bulkTab    = 'text'; // 'text' | 'csv'
     this._bulkText   = '';
     this._csvItems   = [];
+    this._calYear    = new Date().getFullYear();
+    this._calMonth   = new Date().getMonth();
+    this._calDay     = null;
     this._form       = this._blankForm();
     this._picker     = null;
     this._unsubFn    = null;
@@ -211,6 +214,7 @@ class AlhTodoCard extends HTMLElement {
     const active   = this._items.filter(i => i.status === 'needs_action');
     const openCnt  = active.length;
     const filtered = this._filterByView(this._showDone ? this._items : active);
+    const isCal    = this._view === 'cal';
 
     this.shadowRoot.innerHTML = `
       <style>${this._css()}</style>
@@ -218,8 +222,10 @@ class AlhTodoCard extends HTMLElement {
         ${this._header(openCnt)}
         ${this._bulkMode ? this._bulkHtml() : `
           ${this._viewTabs()}
-          ${filtered.length ? `<ul class="list">${filtered.map(i => this._item(i)).join('')}</ul>` : this._empty()}
-          ${this._form.open ? this._formHtml() : ''}
+          ${isCal ? this._calHtml() : `
+            ${filtered.length ? `<ul class="list">${filtered.map(i => this._item(i)).join('')}</ul>` : this._empty()}
+            ${this._form.open ? this._formHtml() : ''}
+          `}
         `}
       </div>
     `;
@@ -268,6 +274,7 @@ class AlhTodoCard extends HTMLElement {
       { v: 'all',   l: 'Alle' },
       { v: 'today', l: 'Heute' },
       { v: 'week',  l: 'Woche' },
+      { v: 'cal',   l: 'Kalender' },
     ];
     return `
       <div class="view-tabs">
@@ -327,6 +334,77 @@ class AlhTodoCard extends HTMLElement {
             ` : ''}
           </div>
         `}
+      </div>
+    `;
+  }
+
+  _calHtml() {
+    const year  = this._calYear;
+    const month = this._calMonth;
+    const today = isoToday();
+
+    const monthLabel = new Date(year, month, 1)
+      .toLocaleDateString('de-DE', { month: 'long', year: 'numeric' });
+
+    const firstDow   = new Date(year, month, 1).getDay();
+    const startOff   = firstDow === 0 ? 6 : firstDow - 1;
+    const daysInMon  = new Date(year, month + 1, 0).getDate();
+    const daysInPrev = new Date(year, month, 0).getDate();
+
+    const cells = [];
+    for (let i = startOff - 1; i >= 0; i--)
+      cells.push({ day: daysInPrev - i, other: true });
+    for (let d = 1; d <= daysInMon; d++) {
+      const iso   = `${year}-${String(month + 1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+      const tasks = this._items.filter(i => i.due === iso && i.status === 'needs_action');
+      cells.push({ day: d, iso, tasks, isToday: iso === today, overdue: iso < today && tasks.length > 0 });
+    }
+    let nd = 1;
+    while (cells.length % 7 !== 0) cells.push({ day: nd++, other: true });
+
+    const selTasks = this._calDay
+      ? this._items.filter(i => i.due === this._calDay && i.status === 'needs_action')
+      : [];
+
+    const wds = ['Mo','Di','Mi','Do','Fr','Sa','So'];
+
+    return `
+      <div class="cal">
+        <div class="cal__nav">
+          <button class="icon-btn" data-cal-nav="-1">
+            <svg viewBox="0 0 24 24"><path d="M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z"/></svg>
+          </button>
+          <span class="cal__month">${x(monthLabel)}</span>
+          <button class="icon-btn" data-cal-nav="1">
+            <svg viewBox="0 0 24 24"><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/></svg>
+          </button>
+        </div>
+        <div class="cal__grid">
+          ${wds.map(d => `<div class="cal__wd">${d}</div>`).join('')}
+          ${cells.map(c => {
+            if (c.other) return `<div class="cal__day cal__day--other"><span class="cal__day-num">${c.day}</span></div>`;
+            const cls = ['cal__day',
+              c.isToday                      ? 'cal__day--today'     : '',
+              c.overdue                      ? 'cal__day--overdue'   : '',
+              c.tasks?.length                ? 'cal__day--has-tasks' : '',
+              this._calDay === c.iso         ? 'cal__day--selected'  : '',
+            ].filter(Boolean).join(' ');
+            return `
+              <div class="${cls}" data-cal-day="${c.iso}">
+                <span class="cal__day-num">${c.day}</span>
+                ${c.tasks?.length ? `<span class="cal__dot">${c.tasks.length > 1 ? c.tasks.length : ''}</span>` : ''}
+              </div>`;
+          }).join('')}
+        </div>
+        ${this._calDay ? `
+          <div class="cal__detail">
+            <div class="cal__detail-title">
+              ${x(new Date(this._calDay + 'T12:00:00').toLocaleDateString('de-DE', { weekday: 'long', day: 'numeric', month: 'long' }))}
+            </div>
+            ${selTasks.length
+              ? `<ul class="list cal__detail-list">${selTasks.map(i => this._item(i)).join('')}</ul>`
+              : `<div class="empty" style="padding:10px 0 4px">Keine Aufgaben</div>`}
+          </div>` : ''}
       </div>
     `;
   }
@@ -430,6 +508,23 @@ class AlhTodoCard extends HTMLElement {
     root.querySelectorAll('[data-view]').forEach(btn =>
       btn.addEventListener('click', () => {
         this._view = btn.dataset.view;
+        this._render();
+      })
+    );
+
+    root.querySelectorAll('[data-cal-nav]').forEach(btn =>
+      btn.addEventListener('click', () => {
+        this._calMonth += parseInt(btn.dataset.calNav);
+        if (this._calMonth > 11) { this._calMonth = 0;  this._calYear++; }
+        if (this._calMonth < 0)  { this._calMonth = 11; this._calYear--; }
+        this._calDay = null;
+        this._render();
+      })
+    );
+
+    root.querySelectorAll('[data-cal-day]').forEach(el =>
+      el.addEventListener('click', () => {
+        this._calDay = this._calDay === el.dataset.calDay ? null : el.dataset.calDay;
         this._render();
       })
     );
@@ -985,6 +1080,71 @@ class AlhTodoCard extends HTMLElement {
       .btn--ghost:hover { background: rgba(128,128,128,0.18); }
       .btn--danger { background: rgba(244,67,54,0.1); color: var(--error-color,#f44336); margin-right: auto; }
       .btn--danger:hover { background: rgba(244,67,54,0.2); }
+
+      /* ── Calendar ── */
+      .cal { padding: 0 10px 12px; }
+
+      .cal__nav {
+        display: flex; align-items: center; justify-content: space-between;
+        padding: 2px 2px 10px;
+      }
+      .cal__month {
+        font-size: 14px; font-weight: 600;
+        color: var(--primary-text-color, currentColor);
+        text-transform: capitalize;
+      }
+
+      .cal__grid {
+        display: grid; grid-template-columns: repeat(7, 1fr);
+        gap: 2px;
+      }
+      .cal__wd {
+        text-align: center; font-size: 11px; font-weight: 600;
+        color: var(--secondary-text-color, currentColor); opacity: 0.45;
+        padding: 4px 0 6px;
+      }
+
+      .cal__day {
+        aspect-ratio: 1; display: flex; flex-direction: column;
+        align-items: center; justify-content: center; gap: 2px;
+        border-radius: 8px; cursor: pointer;
+        transition: background 0.12s; position: relative;
+      }
+      .cal__day:hover { background: rgba(128,128,128,0.08); }
+      .cal__day--other { opacity: 0.2; cursor: default; pointer-events: none; }
+      .cal__day--selected { background: rgba(var(--rgb-primary-color,3,169,244),0.1); }
+
+      .cal__day-num {
+        font-size: 13px; line-height: 1;
+        color: var(--primary-text-color, currentColor);
+      }
+      .cal__day--today .cal__day-num {
+        background: var(--primary-color,#03a9f4); color: #fff;
+        border-radius: 50%; width: 22px; height: 22px;
+        display: flex; align-items: center; justify-content: center;
+        font-size: 12px;
+      }
+
+      .cal__dot {
+        width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0;
+        background: var(--primary-color,#03a9f4);
+        font-size: 8px; font-weight: 700; color: #fff;
+        display: flex; align-items: center; justify-content: center;
+        line-height: 1;
+      }
+      .cal__day--overdue .cal__dot { background: var(--error-color,#f44336); }
+
+      .cal__detail {
+        margin-top: 10px;
+        border-top: 1px solid rgba(128,128,128,0.12);
+        padding-top: 8px;
+      }
+      .cal__detail-title {
+        font-size: 13px; font-weight: 600;
+        color: var(--primary-text-color, currentColor);
+        margin-bottom: 4px; text-transform: capitalize; padding: 0 4px;
+      }
+      .cal__detail-list { padding-bottom: 0; }
     `;
   }
 }
