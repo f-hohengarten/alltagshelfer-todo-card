@@ -81,7 +81,8 @@ class AlhTodoCard extends HTMLElement {
     this._hass         = null;
     this._showDone     = false;
     this._form         = this._blankForm();
-    this._picker       = null; // 'date' | 'recur' | 'remind' | null
+    this._picker       = null;
+    this._unsubFn      = null;
   }
 
   _blankForm() {
@@ -94,18 +95,41 @@ class AlhTodoCard extends HTMLElement {
 
   setConfig(config) {
     if (!config.entity) throw new Error('entity ist erforderlich');
+    const entityChanged = config.entity !== this._config.entity;
     this._config   = { title: 'Aufgaben', show_completed: false, ...config };
     this._showDone = this._config.show_completed;
+    if (entityChanged && this._hass) this._subscribe();
     this._render();
   }
 
   set hass(hass) {
+    const first = !this._hass;
     this._hass = hass;
-    const state = hass.states[this._config.entity];
-    if (!state) return;
-    const items = state.attributes.items ?? [];
-    if (JSON.stringify(items) !== JSON.stringify(this._items)) {
-      this._items = items;
+    if (first && this._config.entity) this._subscribe();
+  }
+
+  connectedCallback() {
+    if (this._hass && this._config.entity && !this._unsubFn) this._subscribe();
+  }
+
+  disconnectedCallback() {
+    if (this._unsubFn) { this._unsubFn(); this._unsubFn = null; }
+  }
+
+  async _subscribe() {
+    if (this._unsubFn) { this._unsubFn(); this._unsubFn = null; }
+    try {
+      this._unsubFn = await this._hass.connection.subscribeMessage(
+        (result) => {
+          this._items = result.items ?? [];
+          this._render();
+        },
+        { type: 'todo/subscribe_todo_items', entity_id: this._config.entity }
+      );
+    } catch (e) {
+      // Fallback für ältere HA-Versionen: Items aus State-Attributen lesen
+      const state = this._hass.states[this._config.entity];
+      this._items = state?.attributes?.items ?? [];
       this._render();
     }
   }
